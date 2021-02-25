@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Neo.VM;
@@ -38,42 +39,39 @@ unloaded, the remaining code associated with that ContractTask is executed.
 
 namespace await_test
 {
-    // a type is awaitable if it has a GetAwaiter method. Having these as extension methods eliminates
-    // and issue with instance methods colliding on return type
-    static class Extensions
-    {
-        public static ContractTaskAwaiter GetAwaiter(this ContractTask @this) => new ContractTaskAwaiter(@this);
-        public static ContractTaskAwaiter<T> GetAwaiter<T>(this ContractTask<T> @this) => new ContractTaskAwaiter<T>(@this);
-    }
-
-    // Models a VM contract execution that does not return a value (like Task)
+    [AsyncMethodBuilder(typeof(ContractTaskBuilder))]
     class ContractTask
     {
-        private Action? continuation = null;
-        public bool IsCompleted { get; private set; } = false;
 
-        public void OnCompleted(Action continuation)
-        {
-            var value = Interlocked.CompareExchange<Action?>(ref this.continuation, continuation, null);
-        }
+        public ContractTaskAwaiter GetAwaiter()=>  new ContractTaskAwaiter(this);
 
-        public virtual void SetResult(StackItem stackItem)
-        {
-            throw new Exception();
-        }
+        // private Action? continuation = null;
 
-        public void RunContinuation()
-        {
-            if (continuation == null || IsCompleted)
-            {
-                throw new Exception();
-            }
-            else
-            {
-                continuation();
-                IsCompleted = true;
-            }
-        }
+
+        // public bool IsCompleted { get; private set; } = false;
+
+        // public void OnCompleted(Action continuation)
+        // {
+        //     var value = Interlocked.CompareExchange<Action?>(ref this.continuation, continuation, null);
+        // }
+
+        // public virtual void SetResult(StackItem stackItem)
+        // {
+        //     throw new Exception();
+        // }
+
+        // public void RunContinuation()
+        // {
+        //     if (continuation == null || IsCompleted)
+        //     {
+        //         throw new Exception();
+        //     }
+        //     else
+        //     {
+        //         continuation();
+        //         IsCompleted = true;
+        //     }
+        // }
     }
 
     // implements type needed by await keyword
@@ -86,30 +84,56 @@ namespace await_test
             this.contractTask = contractTask;
         }
 
-        public bool IsCompleted => this.contractTask.IsCompleted;
-        public void GetResult() {; }
-        public void OnCompleted(Action continuation) => contractTask.OnCompleted(continuation);
+        public bool IsCompleted => throw new Exception(); //this.contractTask.IsCompleted;
+        public void GetResult() { }
+        public void OnCompleted(Action continuation) => throw new Exception(); //contractTask.OnCompleted(continuation);
     }
 
-    // Models a VM contract execution that returns a value (like Task<T>)
+    internal class ContractTaskBuilder
+    {
+        public static ContractTaskBuilder Create()
+        {
+            throw new NotImplementedException();
+        }
+
+        public void Start<TStateMachine>(ref TStateMachine stateMachine)
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+
+        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
+        public void SetException(Exception exception) => throw new NotImplementedException();
+        public void SetResult() => throw new NotImplementedException();
+        public void AwaitOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
+            where TAwaiter : INotifyCompletion
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+        public void AwaitUnsafeOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
+            where TAwaiter : INotifyCompletion
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+
+        public ContractTask Task => throw new NotImplementedException();
+    }
+
+    [AsyncMethodBuilder(typeof(ContractTaskBuilder<>))]
     class ContractTask<T> : ContractTask
     {
-        public T? Value { get; private set; }
+        public new ContractTaskAwaiter<T> GetAwaiter()=>  new ContractTaskAwaiter<T>(this);
 
-        public override void SetResult(StackItem stackItem)
-        {
-            if (typeof(T) == typeof(string))
-            {
-                Value = (T)(object)stackItem.GetString();
-            }
-            else
-            {
-                throw new Exception();
-            }
-        }
+        // private readonly AppEngine engine;
+
+        // public ContractTask(AppEngine engine)
+        // {
+        //     this.engine = engine;
+        // }
+
+        // public new T GetResult()
+        // {
+        //     return default!;
+        //     // return (T)engine.Convert(engine.Pop(), new InteropParameterDescriptor(typeof(T)));
+        // }
     }
 
-    // implements type needed by await keyword
     class ContractTaskAwaiter<T> : INotifyCompletion
     {
         private readonly ContractTask<T> contractTask;
@@ -119,45 +143,96 @@ namespace await_test
             this.contractTask = contractTask;
         }
 
-        public bool IsCompleted => this.contractTask.IsCompleted;
+        public bool IsCompleted => throw new Exception(); //this.contractTask.IsCompleted;
+        public T GetResult() => throw new Exception(); //this.contractTask.IsCompleted;
+        public void OnCompleted(Action continuation) => throw new Exception(); //contractTask.OnCompleted(continuation);
+    }
 
-        public T GetResult() => contractTask.Value ?? throw new Exception();
-
-        public void OnCompleted(Action continuation)
+    internal class ContractTaskBuilder<T>
+    {
+        public static ContractTaskBuilder<T> Create()
         {
-            contractTask.OnCompleted(continuation);
+            throw new NotImplementedException();
         }
+
+        public void Start<TStateMachine>(ref TStateMachine stateMachine)
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+
+        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
+        public void SetException(Exception exception) => throw new NotImplementedException();
+        public void SetResult(T result) => throw new NotImplementedException();
+        public void AwaitOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
+            where TAwaiter : INotifyCompletion
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+        public void AwaitUnsafeOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
+            where TAwaiter : INotifyCompletion
+            where TStateMachine : IAsyncStateMachine
+            => throw new NotImplementedException();
+
+        public ContractTask<T> Task => throw new NotImplementedException();
     }
 
     // Stripped down ApplicationEngine for test purposes
     class AppEngine : ExecutionEngine
     {
-        protected override async void OnSysCall(uint method)
+        protected override void OnSysCall(uint method)
         {
-            switch (method)
+            if (method == 0)
             {
-                // fake SysCall method that "invokes" a VM script and waits for the script to complete before continuting
-                case 1:
-                    {
-                        Console.WriteLine($"OnSysCall FAKE AWAIT CALL before");
-                        await CallFromNativeContract();
-                        Console.WriteLine($"OnSysCall FAKE AWAIT CALL after");
-                    }
-                    break;
-                // fake SysCall method that "invokes" a VM script, waits for the script to complete before continuting
-                // and receives a result
-                case 2:
-                    {
-                        Console.WriteLine($"OnSysCall FAKE AWAIT RESULT CALL before");
-                        var result = await CallFromNativeContract("Paddington");
-                        Console.WriteLine($"OnSysCall FAKE AWAIT RESULT CALL after: {result}");
-                    }
-                    break;
-                // All other syscalls, simply echo value to console
-                default:
-                    Console.WriteLine($"OnSysCall {method}");
-                    break;
+                var arg = Pop().GetString();
+                Console.WriteLine($"{nameof(OnSysCall)} 0 {arg}");
+                return;
             }
+
+            var bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var methodInfo = method switch
+            {
+                1 => typeof(AppEngine).GetMethod(nameof(NativeVoidReturn), bindingFlags),
+                2 => typeof(AppEngine).GetMethod(nameof(NativeStringReturn), bindingFlags),
+                3 => typeof(AppEngine).GetMethod(nameof(NativeAsyncVoidReturn), bindingFlags),
+                4 => typeof(AppEngine).GetMethod(nameof(NativeAsyncStringReturn), bindingFlags),
+                _ => throw new InvalidOperationException(),
+            };
+
+            if (methodInfo == null) throw new InvalidOperationException();
+
+            var result = methodInfo.Invoke(this, Array.Empty<object>());
+            if (methodInfo.ReturnType == typeof(string))
+            {
+                if (result == null) throw new InvalidOperationException();
+                Push((string)result);
+            }
+        }
+
+        void NativeVoidReturn()
+        {
+            Console.WriteLine(nameof(NativeVoidReturn));
+        }
+
+        string NativeStringReturn()
+        {
+            var now = DateTimeOffset.Now.ToString();
+            Console.WriteLine($"{nameof(NativeStringReturn)} {now}");
+            return now;
+        }
+
+        async ContractTask NativeAsyncVoidReturn()
+        {
+            Console.WriteLine($"{nameof(NativeAsyncVoidReturn)} START");
+            await CallFromNativeContract();
+            Console.WriteLine($"{nameof(NativeAsyncVoidReturn)} END");
+        }
+
+        async ContractTask<string> NativeAsyncStringReturn()
+        {
+            var now = DateTimeOffset.Now.ToString();
+
+            Console.WriteLine($"{nameof(NativeAsyncStringReturn)} START");
+            var result = await CallFromNativeContract(now);
+            Console.WriteLine($"{nameof(NativeAsyncStringReturn)} END");
+            return result;
         }
 
         // track outstanding contractTasks awaiting completion
@@ -166,15 +241,15 @@ namespace await_test
         protected override void ContextUnloaded(ExecutionContext context)
         {
             // if there's an contract task associated with this context, run it
-            if (contractTasks.TryGetValue(context, out var task))
-            {
-                if (CurrentContext.EvaluationStack.Count > 0)
-                {
-                    task.SetResult(Pop());
-                }
-                task.RunContinuation();
-                contractTasks.Remove(context);
-            }
+            // if (contractTasks.TryGetValue(context, out var task))
+            // {
+            //     if (CurrentContext.EvaluationStack.Count > 0)
+            //     {
+            //         task.SetResult(Pop());
+            //     }
+            //     task.RunContinuation();
+            //     contractTasks.Remove(context);
+            // }
 
             base.ContextUnloaded(context);
         }
@@ -183,7 +258,8 @@ namespace await_test
         internal ContractTask CallFromNativeContract()
         {
             using var sb = new ScriptBuilder();
-            sb.EmitSysCall(100);
+            sb.EmitPush($"{nameof(CallFromNativeContract)} async void return");
+            sb.EmitSysCall(0);
             sb.Emit(OpCode.RET);
             var script = sb.ToArray();
 
@@ -198,7 +274,8 @@ namespace await_test
         internal ContractTask<string> CallFromNativeContract(string value)
         {
             using var sb = new ScriptBuilder();
-            sb.EmitSysCall(200);
+            sb.EmitPush($"{nameof(CallFromNativeContract)} async string return");
+            sb.EmitSysCall(0);
             sb.EmitPush(value);
             sb.Emit(OpCode.RET);
             var script = sb.ToArray();
@@ -221,15 +298,25 @@ namespace await_test
         static void Main(string[] args)
         {
             using var sb = new ScriptBuilder();
-            sb.EmitSysCall(0);
             sb.EmitSysCall(1);
             sb.EmitSysCall(2);
-            sb.EmitSysCall(3);
+            // sb.EmitSysCall(3);
+            // sb.EmitSysCall(4);
             sb.Emit(OpCode.RET);
 
             var engine = new AppEngine();
             engine.LoadScript(sb.ToArray());
             engine.Execute();
+
+            if (engine.ResultStack.Count > 0)
+            {
+                Console.WriteLine("\nResults:");
+
+                foreach (var result in engine.ResultStack)
+                {
+                    Console.WriteLine("  " + result.GetString());
+                }
+            }
         }
     }
 }
