@@ -33,7 +33,8 @@ we want the execution thread to return to the debugger loop so the user can cont
 
 So can we use C#'s async/await infrastructure here? Yes, we can. C# 7 introduced new infrastructure to 
 enable developers to build "task-like types" so that async/await can be used with types other than the 
-built in Task/Task<T> types.
+built in Task/Task<T> types. More details on task like types is available at:
+https://github.com/dotnet/roslyn/blob/master/docs/features/task-types.md
 
 The sample code below is a stripped down example using NeoVM (but not neo.dll). In this example, 
 CallFromNativeContract returns a "ContractTask" type, a "task-like type" that can be awaited, but that
@@ -75,6 +76,7 @@ namespace await_test
         public virtual void SetResult(StackItem item)
         {
             if (!item.IsNull) throw new InvalidOperationException();
+            RunContinuation();
         }
 
         public void RunContinuation()
@@ -84,8 +86,8 @@ namespace await_test
                 throw new Exception();
             }
 
-            continuation();
             IsCompleted = true;
+            continuation();
         }
     }
 
@@ -129,7 +131,7 @@ namespace await_test
         }
 
         public bool IsCompleted => contractTask.IsCompleted;
-        public void GetResult() { }
+        public void GetResult() { if (!IsCompleted) throw new InvalidOperationException(); }
         public void OnCompleted(Action continuation) => contractTask.OnCompleted(continuation);
     }
 
@@ -143,7 +145,7 @@ namespace await_test
         }
 
         public bool IsCompleted => contractTask.IsCompleted;
-        public T? GetResult() => contractTask.Result;
+        public T? GetResult() => IsCompleted ? contractTask.Result : throw new InvalidOperationException();
         public void OnCompleted(Action continuation) => contractTask.OnCompleted(continuation);
     }
 
@@ -160,35 +162,26 @@ namespace await_test
             stateMachine.MoveNext();
         }
 
-        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
         public void SetException(Exception exception) => task.SetException(exception);
         public void SetResult() => task.SetResult();
         public void AwaitOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
             where TAwaiter : INotifyCompletion
             where TStateMachine : IAsyncStateMachine
         {
-            var box = new ContractTaskStateMachineBox<TStateMachine>();
-            box.StateMachine = stateMachine;
+            // need to use ContractTaskStateMachineBox here vecause stateMachine is a ref parameter
+            var box = new ContractTaskStateMachineBox<TStateMachine>(stateMachine);
             awaiter.OnCompleted(box.MoveNextAction);
         }
         public void AwaitUnsafeOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
             where TAwaiter : INotifyCompletion
             where TStateMachine : IAsyncStateMachine
-            => throw new NotImplementedException();
-    }
-
-    class ContractTaskStateMachineBox<TStateMachine> where TStateMachine : IAsyncStateMachine
-    {
-        public TStateMachine? StateMachine;
-
-        private Action? _moveNextAction;
-        public Action MoveNextAction => _moveNextAction ??= new Action(MoveNext);
-
-        private void MoveNext()
         {
-            if (StateMachine == null) throw new InvalidOperationException();
-            StateMachine.MoveNext();
+            // need to use ContractTaskStateMachineBox here vecause stateMachine is a ref parameter
+            var box = new ContractTaskStateMachineBox<TStateMachine>(stateMachine);
+            awaiter.OnCompleted(box.MoveNextAction);
         }
+
+        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
     }
 
     struct ContractTaskBuilder<T>
@@ -204,26 +197,45 @@ namespace await_test
             stateMachine.MoveNext();
         }
 
-        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
         public void SetException(Exception exception) => task.SetException(exception);
-
         public void SetResult(T result) => task.SetResult(result);
 
         public void AwaitOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
             where TAwaiter : INotifyCompletion
             where TStateMachine : IAsyncStateMachine
         {
-            var box = new ContractTaskStateMachineBox<TStateMachine>();
-            box.StateMachine = stateMachine;
+            // need to use ContractTaskStateMachineBox here vecause stateMachine is a ref parameter
+            var box = new ContractTaskStateMachineBox<TStateMachine>(stateMachine);
             awaiter.OnCompleted(box.MoveNextAction);
         }
+
         public void AwaitUnsafeOnCompleted<TAwaiter, TStateMachine>(ref TAwaiter awaiter, ref TStateMachine stateMachine)
             where TAwaiter : INotifyCompletion
             where TStateMachine : IAsyncStateMachine
         {
-            var box = new ContractTaskStateMachineBox<TStateMachine>();
-            box.StateMachine = stateMachine;
+            // need to use ContractTaskStateMachineBox here vecause stateMachine is a ref parameter
+            var box = new ContractTaskStateMachineBox<TStateMachine>(stateMachine);
             awaiter.OnCompleted(box.MoveNextAction);
+        }
+
+        public void SetStateMachine(IAsyncStateMachine stateMachine) => throw new NotImplementedException();
+    }
+
+    class ContractTaskStateMachineBox<TStateMachine> where TStateMachine : IAsyncStateMachine
+    {
+        public readonly TStateMachine StateMachine;
+        private Action? _moveNextAction;
+        public Action MoveNextAction => _moveNextAction ??= new Action(MoveNext);
+
+        public ContractTaskStateMachineBox(TStateMachine stateMachine)
+        {
+            StateMachine = stateMachine;
+        }
+
+        private void MoveNext()
+        {
+            if (StateMachine == null) throw new InvalidOperationException();
+            StateMachine.MoveNext();
         }
     }
 
@@ -236,12 +248,11 @@ namespace await_test
             if (method == 0)
             {
                 var arg = Pop().GetString();
-                using var konsole = Konsole.Color(ConsoleColor.Yellow);
-                Console.WriteLine($"SysCallPrint: \"{arg}\"");
+                Konsole.WriteLine($"SysCallPrint: \"{arg}\"", ConsoleColor.Yellow);
                 return;
             }
 
-            // SysCalls 1-4 each match a sample sys call method to be invoked via reflection
+            // SysCalls 1-5 each match a sample sys call method to be invoked via reflection
             // for the purposes of this prototype, none of the sys call methods take a parameter
             var bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var methodInfo = method switch
@@ -257,140 +268,93 @@ namespace await_test
             if (methodInfo == null) throw new InvalidOperationException();
             var returnType = methodInfo.ReturnType;
 
+            // invoke the selected method via reflection
             var result = methodInfo.Invoke(this, Array.Empty<object>());
+
+            // For contractTask types, await the result
             if (returnType.IsAssignableTo(typeof(ContractTask)))
             {
                 if (result == null) throw new InvalidOperationException();
                 await (ContractTask)result;
 
+                // for ContractTask<T> results, retrieve the result via reflection,
+                // convert to a StackItem and push it on the Evaluation Stack
                 if (returnType.IsGenericType)
                 {
                     var prop = returnType.GetProperty("Result") ?? throw new InvalidOperationException();
-                    var awaitedResult = prop.GetMethod!.Invoke(result, Array.Empty<object>());
-                    var genericArgs = methodInfo.ReturnType.GetGenericArguments();
-                    System.Diagnostics.Debug.Assert(genericArgs.Length == 1);
-                    Push(Convert(genericArgs[0], awaitedResult!));
+                    var awaitedResult = prop.GetMethod!.Invoke(result, Array.Empty<object>()) ?? throw new InvalidOperationException();
+                    Push(Convert(awaitedResult));
                 }
             }
-
             else if (methodInfo.ReturnType != typeof(void))
             {
+                // for non-void and non-ContractTask types, convert the result
+                // to a StackItem and push it onto the evaluation stack
                 if (result == null) throw new InvalidOperationException();
-                Push(Convert(returnType, result));
+                Push(Convert(result));
             }
             else
             {
+                // for void return methods, we're done
                 System.Diagnostics.Debug.Assert(returnType == typeof(void));
             }
 
-            static StackItem Convert(Type type, object obj)
+            // helper method to convert object instances to StackItems
+            static StackItem Convert(object obj) => obj switch
             {
-                if (type == typeof(long))
-                {
-                    return (long)obj;
-                }
-
-                if (type == typeof(string))
-                {
-                    return (string)obj;
-                }
-
-                throw new InvalidOperationException();
-            }
+                string s => s,
+                long i => i,
+                _ => throw new InvalidCastException()
+            };
         }
 
-        // OnSysCall method that returns void
+        // sample OnSysCall method that returns void
         void NativeVoidReturn()
         {
-            using var konsole = Konsole.Color(ConsoleColor.Cyan);
-            Console.WriteLine($"{nameof(NativeVoidReturn)}");
+            Konsole.WriteLine($"{nameof(NativeVoidReturn)}", ConsoleColor.Cyan);
         }
 
-        // OnSysCall method that returns a long
+        // sample OnSysCall method that returns a long
         long NativeLongReturn()
         {
-            using var konsole = Konsole.Color(ConsoleColor.Cyan);
             var now = DateTimeOffset.Now.Ticks;
-            Console.WriteLine($"{nameof(NativeLongReturn)} {now}");
+            Konsole.WriteLine($"{nameof(NativeLongReturn)} {now}", ConsoleColor.Cyan);
             return now;
         }
 
-        // OnSysCall async method that returns void
+        // sample OnSysCall async method that returns void
         async void NativeAsyncVoidReturn()
         {
-            using (var konsole = Konsole.Color(ConsoleColor.Green))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncVoidReturn)} START");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncVoidReturn)} START", ConsoleColor.Green);
             await CallFromNativeContract();
-            using (var konsole = Konsole.Color(ConsoleColor.Magenta))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncVoidReturn)} END");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncVoidReturn)} END", ConsoleColor.Magenta);
         }
 
-        // OnSysCall async method that returns plain ContractTask
+        // sample OnSysCall async method that returns awaitable ContractTask
         async ContractTask NativeAsyncContractTaskReturn()
         {
-            using (var konsole = Konsole.Color(ConsoleColor.Green))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncContractTaskReturn)} START");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncContractTaskReturn)} START", ConsoleColor.Green);
             await CallFromNativeContract();
-            using (var konsole = Konsole.Color(ConsoleColor.Magenta))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncContractTaskReturn)} END");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncContractTaskReturn)} END", ConsoleColor.Magenta);
         }
 
-        // OnSysCall async method that returns a ContractTask<long>
+        // sample OnSysCall async method that returns awaitable ContractTask<long>
         async ContractTask<string> NativeAsyncTaskOfLongReturn()
         {
             var now = DateTimeOffset.Now.Ticks;
-            using (var konsole = Konsole.Color(ConsoleColor.Green))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncTaskOfLongReturn)} START");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncTaskOfLongReturn)} START", ConsoleColor.Green);
             var result = await CallFromNativeContract(now);
-            using (var konsole = Konsole.Color(ConsoleColor.Magenta))
-            {
-                Console.WriteLine($"{nameof(NativeAsyncTaskOfLongReturn)} END {result}");
-            }
+            Konsole.WriteLine($"{nameof(NativeAsyncTaskOfLongReturn)} END {result}", ConsoleColor.Magenta);
+
+            // do a simple math task and convert to string as a stand in for real business logic
             return $"{result - DateTimeOffset.UnixEpoch.Ticks}";
         }
 
+        // store outstanding contractTasks waiting to be completed
         Dictionary<ExecutionContext, ContractTask> contractTasks = new Dictionary<ExecutionContext, ContractTask>();
 
-        static T Convert<T>(StackItem item)
-        {
-            var type = typeof(T);
-            if (type == typeof(long))
-            {
-                return (T)(object)(long)item.GetInteger();
-            }
-
-            if (type == typeof(string))
-            {
-                return (T)(object)item.GetString();
-            }
-
-            throw new InvalidOperationException();
-        }
-
-        private ContractTask RegisterCompletion(ExecutionContext context)
-        {
-            var task = new ContractTask();
-            contractTasks.Add(context, task);
-            return task;
-        }
-        
-        private ContractTask<T> RegisterCompletion<T>(ExecutionContext context)
-        {
-            var task = new ContractTask<T>();
-            contractTasks.Add(context, task);
-            return task;
-        }
-
+        // Check to see if the unloaded context was associated with an outstanding ContractTask
+        // if so, SetResult/Execption on the task as appropriate
         protected override void ContextUnloaded(ExecutionContext context)
         {
             base.ContextUnloaded(context);
@@ -416,11 +380,13 @@ namespace await_test
             sb.Emit(OpCode.RET);
 
             var ctx = LoadScript(sb.ToArray(), 0);
-            return RegisterCompletion(ctx);
+            var task = new ContractTask();
+            contractTasks.Add(ctx, task);
+            return task;
         }
 
         // Fake CallFromNativeContract loads a script that invokes SysCall 0, 
-        // pushes a long param value onto the VM execution stack and returns
+        // pushes the long param value onto the VM execution stack and returns
         ContractTask<long> CallFromNativeContract(long value)
         {
             using var sb = new ScriptBuilder();
@@ -430,11 +396,13 @@ namespace await_test
             sb.Emit(OpCode.RET);
 
             var ctx = LoadScript(sb.ToArray(), 1);
-            return RegisterCompletion<long>(ctx);
+            var task = new ContractTask<long>();
+            contractTasks.Add(ctx, task);
+            return task;
         }
 
-        // // Fake CallFromNativeContract loads a script that invokes SysCall 0, 
-        // // pushes a string param value onto the VM execution stack and returns
+        // Fake CallFromNativeContract loads a script that invokes SysCall 0, 
+        // pushes the string param value onto the VM execution stack and returns
         ContractTask<string> CallFromNativeContract(string value)
         {
             using var sb = new ScriptBuilder();
@@ -444,10 +412,12 @@ namespace await_test
             sb.Emit(OpCode.RET);
 
             var ctx = LoadScript(sb.ToArray());
-            return RegisterCompletion<string>(ctx);
+            var task = new ContractTask<string>();
+            contractTasks.Add(ctx, task);
+            return task;
         }
 
-        // this is only here for debug output
+        // Emit information about each instruction before it is executed for debug purposes
         protected override void PreExecuteInstruction()
         {
             var instr = CurrentContext.CurrentInstruction;
@@ -477,7 +447,7 @@ namespace await_test
             {
                 return item.Type switch
                 {
-                    StackItemType.ByteString => item.GetString(),
+                    StackItemType.ByteString => $"\"{item.GetString()}\"",
                     StackItemType.Integer => item.GetInteger().ToString(),
                     _ => throw new InvalidOperationException()
                 };
@@ -487,13 +457,7 @@ namespace await_test
 
     class Program
     {
-        static async Task Main(string[] args)
-        {
-            await Task.Delay(0);
-            RunEngine();
-        }
-
-        static void RunEngine()
+        static void Main(string[] args)
         {
             using var sb = new ScriptBuilder();
             sb.EmitSysCall(1);
@@ -505,14 +469,7 @@ namespace await_test
 
             var engine = new AppEngine();
             engine.LoadScript(sb.ToArray());
-            try
-            {
-                engine.Execute();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine(ex.GetType());
-            }
+            engine.Execute();
 
             if (engine.ResultStack.Count > 0)
             {
@@ -555,6 +512,13 @@ namespace await_test
         public void Dispose()
         {
             Console.ForegroundColor = _orig_fg;
+        }
+
+        // helper for writing a single line of text in a specified color
+        public static void WriteLine(string text, ConsoleColor color)
+        {
+            using var konsole = Konsole.Color(color);
+            Console.WriteLine(text);
         }
     }
 }
