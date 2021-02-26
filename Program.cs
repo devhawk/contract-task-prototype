@@ -50,13 +50,9 @@ namespace await_test
     {
         Action? continuation = null;
 
-        private void OnParentCompleted(object? sender, EventArgs e)
-        {
-            RunContinuation();
-        }
-
         public ContractTaskAwaiter GetAwaiter() => new ContractTaskAwaiter(this);
         public bool IsCompleted { get; private set; } = false;
+        public Exception? Exception { get; private set; }
 
         public void OnCompleted(Action continuation)
         {
@@ -66,6 +62,8 @@ namespace await_test
 
         public void SetException(Exception exception)
         {
+            if (IsCompleted) throw new InvalidOperationException();
+            Exception = exception;
         }
 
         public virtual void SetResult()
@@ -81,9 +79,11 @@ namespace await_test
 
         public void RunContinuation()
         {
-            if (continuation == null || IsCompleted)
+            if (IsCompleted
+                || continuation == null 
+                || Exception != null)
             {
-                throw new Exception();
+                throw new InvalidOperationException();
             }
 
             IsCompleted = true;
@@ -242,61 +242,86 @@ namespace await_test
     // Stripped down ApplicationEngine for test purposes
     class AppEngine : ExecutionEngine
     {
+        public Exception? FaultException { get; private set; }
+
+        protected override void OnFault(Exception e)
+        {
+            Konsole.WriteLine($"OnFault: {e.Message}", ConsoleColor.Red);
+            FaultException = e;
+            base.OnFault(e);
+        }
+
         protected override async void OnSysCall(uint method)
         {
-            // SysCall 0 pops a single parameter from the eval stack, converts it to a string and prints it to the console
-            if (method == 0)
+            // Since OnSysCall is async void, exceptions need to be caught and handled locally. Any exception
+            // thrown from an async void method gets swallowed.
+            try
             {
-                var arg = Pop().GetString();
-                Konsole.WriteLine($"SysCallPrint: \"{arg}\"", ConsoleColor.Yellow);
-                return;
-            }
-
-            // SysCalls 1-5 each match a sample sys call method to be invoked via reflection
-            // for the purposes of this prototype, none of the sys call methods take a parameter
-            var bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-            var methodInfo = method switch
-            {
-                1 => typeof(AppEngine).GetMethod(nameof(NativeVoidReturn), bindingFlags),
-                2 => typeof(AppEngine).GetMethod(nameof(NativeLongReturn), bindingFlags),
-                3 => typeof(AppEngine).GetMethod(nameof(NativeAsyncVoidReturn), bindingFlags),
-                4 => typeof(AppEngine).GetMethod(nameof(NativeAsyncContractTaskReturn), bindingFlags),
-                5 => typeof(AppEngine).GetMethod(nameof(NativeAsyncTaskOfLongReturn), bindingFlags),
-                _ => throw new InvalidOperationException(),
-            };
-
-            if (methodInfo == null) throw new InvalidOperationException();
-            var returnType = methodInfo.ReturnType;
-
-            // invoke the selected method via reflection
-            var result = methodInfo.Invoke(this, Array.Empty<object>());
-
-            // For contractTask types, await the result
-            if (returnType.IsAssignableTo(typeof(ContractTask)))
-            {
-                if (result == null) throw new InvalidOperationException();
-                await (ContractTask)result;
-
-                // for ContractTask<T> results, retrieve the result via reflection,
-                // convert to a StackItem and push it on the Evaluation Stack
-                if (returnType.IsGenericType)
+                // SysCall 0 pops a single parameter from the eval stack, converts it to a string and prints it to the console
+                if (method == 0)
                 {
-                    var prop = returnType.GetProperty("Result") ?? throw new InvalidOperationException();
-                    var awaitedResult = prop.GetMethod!.Invoke(result, Array.Empty<object>()) ?? throw new InvalidOperationException();
-                    Push(Convert(awaitedResult));
+                    var arg = Pop().GetString();
+                    Konsole.WriteLine($"SysCallPrint: \"{arg}\"", ConsoleColor.Yellow);
+                    return;
+                }
+
+                // SysCalls 1-8 each match a sample sys call method to be invoked via reflection
+                // SysCalls 6-8 all throw exceptions of various sorts for test purposes 
+                // for the purposes of this prototype, none of the sys call methods take a parameter
+                var methodInfo = method switch
+                {
+                    1 => GetMethod(nameof(NativeVoidReturn)),
+                    2 => GetMethod(nameof(NativeLongReturn)),
+                    3 => GetMethod(nameof(NativeAsyncVoidReturn)),
+                    4 => GetMethod(nameof(NativeAsyncContractTaskReturn)),
+                    5 => GetMethod(nameof(NativeAsyncTaskOfLongReturn)),
+                    6 => GetMethod(nameof(NativeVoidReturnThrows)),
+                    7 => GetMethod(nameof(NativeAsyncVoidReturnThrows)),
+                    8 => GetMethod(nameof(NativeAsyncContractTaskReturnThrows)),
+                    _ => throw new InvalidOperationException(),
+                };
+
+                static MethodInfo GetMethod(string name)
+                {
+                    const BindingFlags bindingFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    return typeof(AppEngine).GetMethod(name, bindingFlags) ?? throw new InvalidOperationException();
+                }
+
+                // invoke the selected method via reflection
+                var result = methodInfo.Invoke(this, Array.Empty<object>());
+
+                // For contractTask types, await the result
+                var returnType = methodInfo.ReturnType;
+                if (returnType.IsAssignableTo(typeof(ContractTask)))
+                {
+                    if (result == null) throw new InvalidOperationException();
+                    await (ContractTask)result;
+
+                    // for ContractTask<T> results, retrieve the result via reflection,
+                    // convert to a StackItem and push it on the Evaluation Stack
+                    if (returnType.IsGenericType)
+                    {
+                        var prop = returnType.GetProperty("Result") ?? throw new InvalidOperationException();
+                        var awaitedResult = prop.GetMethod!.Invoke(result, Array.Empty<object>()) ?? throw new InvalidOperationException();
+                        Push(Convert(awaitedResult));
+                    }
+                }
+                else if (methodInfo.ReturnType != typeof(void))
+                {
+                    // for non-void and non-ContractTask types, convert the result
+                    // to a StackItem and push it onto the evaluation stack
+                    if (result == null) throw new InvalidOperationException();
+                    Push(Convert(result));
+                }
+                else
+                {
+                    // for void return methods, we're done
+                    System.Diagnostics.Debug.Assert(returnType == typeof(void));
                 }
             }
-            else if (methodInfo.ReturnType != typeof(void))
+            catch (Exception ex)
             {
-                // for non-void and non-ContractTask types, convert the result
-                // to a StackItem and push it onto the evaluation stack
-                if (result == null) throw new InvalidOperationException();
-                Push(Convert(result));
-            }
-            else
-            {
-                // for void return methods, we're done
-                System.Diagnostics.Debug.Assert(returnType == typeof(void));
+                OnFault(ex);
             }
 
             // helper method to convert object instances to StackItems
@@ -311,7 +336,13 @@ namespace await_test
         // sample OnSysCall method that returns void
         void NativeVoidReturn()
         {
-            Konsole.WriteLine($"{nameof(NativeVoidReturn)}", ConsoleColor.Cyan);
+            Konsole.WriteLine(nameof(NativeVoidReturn), ConsoleColor.Cyan);
+        }
+
+        // sample OnSysCall method that returns void and throws
+        void NativeVoidReturnThrows()
+        {
+            throw new Exception(nameof(NativeVoidReturnThrows));
         }
 
         // sample OnSysCall method that returns a long
@@ -330,6 +361,14 @@ namespace await_test
             Konsole.WriteLine($"{nameof(NativeAsyncVoidReturn)} END", ConsoleColor.Magenta);
         }
 
+        // sample OnSysCall async method that returns void and throws
+        async void NativeAsyncVoidReturnThrows()
+        {
+            Konsole.WriteLine($"{nameof(NativeAsyncVoidReturnThrows)} START", ConsoleColor.Green);
+            await CallFromNativeContract(true);
+            Konsole.WriteLine($"{nameof(NativeAsyncVoidReturnThrows)} END", ConsoleColor.Magenta);
+        }
+
         // sample OnSysCall async method that returns awaitable ContractTask
         async ContractTask NativeAsyncContractTaskReturn()
         {
@@ -337,6 +376,15 @@ namespace await_test
             await CallFromNativeContract();
             Konsole.WriteLine($"{nameof(NativeAsyncContractTaskReturn)} END", ConsoleColor.Magenta);
         }
+
+        // sample OnSysCall async method that returns awaitable ContractTask
+        async ContractTask NativeAsyncContractTaskReturnThrows()
+        {
+            Konsole.WriteLine($"{nameof(NativeAsyncContractTaskReturnThrows)} START", ConsoleColor.Green);
+            await CallFromNativeContract(true);
+            Konsole.WriteLine($"{nameof(NativeAsyncContractTaskReturnThrows)} END", ConsoleColor.Magenta);
+        }
+
 
         // sample OnSysCall async method that returns awaitable ContractTask<long>
         async ContractTask<string> NativeAsyncTaskOfLongReturn()
@@ -359,8 +407,12 @@ namespace await_test
         {
             base.ContextUnloaded(context);
             if (!contractTasks.Remove(context, out var task)) return;
-            if (UncaughtException is not null) 
+            if (UncaughtException is not null)
             {
+                // Note, this branch should never be taken. If VM code has an UncaughtException,
+                // it will be thrown as a C# exception in ExecutionEngine.HandleException and 
+                // ExecutionEngine.Execute will exit in the fault state w/o ever unloading
+                // the relevant ExecutionContext.
                 var ex = new VMUnhandledException(UncaughtException);
                 task.SetException(ex);
             }
@@ -371,11 +423,13 @@ namespace await_test
             }
         }
 
-        // Fake CallFromNativeContract loads a script that invokes SysCall 0 and returns
-        ContractTask CallFromNativeContract()
+        // Fake CallFromNativeContract loads a script that invokes SysCall 0 and returns.
+        // optionally throws a VM exception
+        ContractTask CallFromNativeContract(bool throws = false)
         {
             using var sb = new ScriptBuilder();
             sb.EmitPush($"{nameof(CallFromNativeContract)} void return");
+            if (throws) sb.Emit(OpCode.THROW);
             sb.EmitSysCall(0);
             sb.Emit(OpCode.RET);
 
@@ -386,11 +440,13 @@ namespace await_test
         }
 
         // Fake CallFromNativeContract loads a script that invokes SysCall 0, 
-        // pushes the long param value onto the VM execution stack and returns
-        ContractTask<long> CallFromNativeContract(long value)
+        // pushes the long param value onto the VM execution stack and returns.
+        // optionally throws a VM exception
+        ContractTask<long> CallFromNativeContract(long value, bool throws = false)
         {
             using var sb = new ScriptBuilder();
             sb.EmitPush($"{nameof(CallFromNativeContract)} long return");
+            if (throws) sb.Emit(OpCode.THROW);
             sb.EmitSysCall(0);
             sb.EmitPush(value);
             sb.Emit(OpCode.RET);
@@ -402,11 +458,14 @@ namespace await_test
         }
 
         // Fake CallFromNativeContract loads a script that invokes SysCall 0, 
-        // pushes the string param value onto the VM execution stack and returns
-        ContractTask<string> CallFromNativeContract(string value)
+        // pushes the string param value onto the VM execution stack and returns.
+        // optionally throws a VM exception
+
+        ContractTask<string> CallFromNativeContract(string value, bool throws = false)
         {
             using var sb = new ScriptBuilder();
             sb.EmitPush($"{nameof(CallFromNativeContract)} string return");
+            if (throws) sb.Emit(OpCode.THROW);
             sb.EmitSysCall(0);
             sb.EmitPush(value);
             sb.Emit(OpCode.RET);
@@ -425,10 +484,10 @@ namespace await_test
             Console.Write($"{InvocationStack.Count} {CurrentContext.GetHashCode()} {CurrentContext.EvaluationStack.Count} {instr.OpCode}");
             switch (CurrentContext.CurrentInstruction.OpCode)
             {
-                case Neo.VM.OpCode.SYSCALL: 
+                case Neo.VM.OpCode.SYSCALL:
                     Console.Write($" {instr.TokenU32}");
                     break;
-                case Neo.VM.OpCode.PUSHDATA1: 
+                case Neo.VM.OpCode.PUSHDATA1:
                     Console.Write($" \"{Encoding.UTF8.GetString(instr.Operand.Span)}\"");
                     break;
                 case Neo.VM.OpCode.PUSHINT64:
@@ -465,13 +524,21 @@ namespace await_test
             sb.EmitSysCall(3);
             sb.EmitSysCall(4);
             sb.EmitSysCall(5);
+            // SysCalls 6-8 all fault
+            // sb.EmitSysCall(6);
+            // sb.EmitSysCall(7);
+            // sb.EmitSysCall(8);
             sb.Emit(OpCode.RET);
 
             var engine = new AppEngine();
             engine.LoadScript(sb.ToArray());
             engine.Execute();
 
-            if (engine.ResultStack.Count > 0)
+            if (engine.State == VMState.FAULT)
+            {
+                Konsole.WriteLine($"Engine faulted: {engine.FaultException}", ConsoleColor.DarkRed);
+            }
+            else if (engine.ResultStack.Count > 0)
             {
                 using var konsole = Konsole.Color(ConsoleColor.White);
                 Console.WriteLine("\nResults:");
